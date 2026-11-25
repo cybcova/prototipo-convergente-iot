@@ -29,7 +29,7 @@
 //          Zigbee con el mismo mecanismo (misma cola, sendTag(), protocolo, comando 0xFC10, destino
 //          y callbacks). Llevan FLAG_SIMULATED; el coordinador imprime "ORIGEN: SIMULADO".
 //   false: no se generan mensajes ficticios.
-constexpr bool RFID_SIMULATION_MODE = false;
+constexpr bool RFID_SIMULATION_MODE = true;
 constexpr unsigned long SIM_INTERVAL_MS = 8000;
 
 // ---------------- Lector RFID (sin cambios respecto al original) ----------------

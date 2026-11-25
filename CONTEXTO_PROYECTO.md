@@ -31,6 +31,7 @@ Se implementó la primera versión de extremo a extremo (compila; **no probada e
 - Cambios deliberados respecto al ejemplo: tarea separada en el core 1 (el core 0 tiene watchdog idle activo y TinyGSM no cede a la tarea idle), `setBufferSize(512)` (el JSON no cabe en 256 B), `retain=false`.
 - Riesgo de seguridad vigente: broker público sin autenticación ni TLS (cualquiera puede leer/inyectar en el tópico).
 - **Recepción MQTT** (compilada, sin probar con el broker): el LilyGO también se suscribe a `iot/prototipo-convergente/response` en cada conexión/reconexión MQTT (misma conexión, `mqtt.setCallback`, procesado en `mqtt.loop()` dentro de `mqttTask`) e imprime tópico, longitud, tipo y contenido (hex si no es texto UTF-8). No se republica ni se trata como evento RFID. Límite de PubSubClient: ≈ 470 B de payload. Ver `DISENO_MQTT_RFID.md` §10 y `PRUEBAS_MQTT_RFID.md`.
+- **LEDs por MQTT** (compilado, sin probar con hardware): `true` → LED verde GPIO18 2 s; `false` → LED rojo GPIO19 2 s; cualquier otro payload se ignora; un mensaje nuevo reinicia los 2 s. Callback encola, `loop()` controla GPIO y `millis()` (sin `delay`). Lógica en `led_control.h`. Ver `DISENO_MQTT_RFID.md` §11.
 - Pruebas: `bash tests/run_checks.sh` (incluye `tests/mqtt_json_selftest.cpp`); pendientes físicas en `PRUEBAS_MQTT_RFID.md`. Emisor, coordinador y ejemplos: sin cambios en esta etapa.
 
 ## 1. Resumen ejecutivo (estado al momento de la auditoría; ver sección 0)

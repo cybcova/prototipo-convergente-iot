@@ -123,3 +123,26 @@ Estado: implementado y compilado; **no probado con el broker real**.
 - **Límite de tamaño**: PubSubClient **descarta en silencio** los paquetes que no caben en su buffer de 512 B (≈ **470 B de payload** con este tópico); el callback no se invoca y no hay forma de detectarlo desde el firmware.
 - **Mensajes retenidos**: si alguien publica con `retain`, el broker los reenvía en **cada suscripción** (cada reconexión); el callback de PubSubClient 2.8 no informa si el mensaje es retenido.
 - **Seguridad**: broker público sin autenticación: **cualquiera puede publicar** en `…/response` y el contenido aparecerá en el monitor. No se actúa sobre él (solo se imprime), pero no debe usarse para tomar decisiones sin autenticación.
+
+---
+
+## 11. LEDs controlados por MQTT (GPIO18 verde, GPIO19 rojo)
+
+Estado: implementado y compilado; **no probado con LEDs ni con el broker**.
+
+- **Hardware** (según el usuario): GPIO → ánodo → cátodo → resistencia → GND, GND común; se enciende con HIGH. Verde = **GPIO18**, rojo = **GPIO19**. Los pines no se comprobaron contra el esquema de la T-SIM7070G (el ejemplo de referencia usa GPIO4, 26, 27 y 34; el receptor usa 32 y 33).
+- **Orden**: payload de `iot/prototipo-convergente/response`, comparación **exacta por longitud y contenido** (no se asume NUL final): solo `true` o `false` en minúsculas, sin espacios ni saltos de línea. `TRUE`, `True`, `true\n`, ` true`, `1`, JSON o vacío se ignoran.
+
+| Payload | Verde (GPIO18) | Rojo (GPIO19) |
+|---|---|---|
+| `true` | encendido 2000 ms | apagado |
+| `false` | apagado | encendido 2000 ms |
+| cualquier otro | sin cambios y **sin reiniciar el temporizador** (se imprime `[LED] Mensaje ignorado…`) | sin cambios |
+
+- Pasados 2000 ms ambos se apagan. Un mensaje válido durante ese tiempo apaga el LED anterior, enciende el correspondiente y **reinicia** los 2 s (también si se repite el mismo valor). Nunca hay ambos encendidos: al cambiar se apaga primero y luego se enciende.
+- Al arrancar, `setup()` configura ambos pines como `OUTPUT` y los pone en LOW **antes** que cualquier otra cosa.
+- **Sin bloqueos**: sin `delay(2000)`. Reparto: el **callback MQTT** (en `mqttTask`, que puede pasar minutos esperando red) solo valida y deposita la orden en una cola de 8 bytes (espera 0). **`loop()`** (cada ~1 ms) es el único dueño de los GPIO y del temporizador (`millis()`, aritmética sin signo, correcta al desbordar). Así el LED se apaga a tiempo aunque MQTT esté reconectando, y el LED no retrasa ni la UART ni MQTT.
+- Precisión: el apagado ocurre en la primera vuelta de `loop()` tras cumplirse 2000 ms (≈ 1–2 ms de jitter típico; `loop()` puede tardar algo más mientras imprime un evento, ≈ 60 ms).
+- Salida: `[LED] Valor recibido: true -> LED VERDE (GPIO18) encendido 2000 ms, LED rojo apagado` y `[LED] 2000 ms cumplidos: ambos LEDs apagados`.
+- Lógica en `LilyGoReceptor/led_control.h` (pura, probada con `static_assert` en `tests/led_control_selftest.cpp`).
+- Seguridad: el broker es público; **cualquiera que publique `true`/`false` en ese tópico encenderá los LEDs**. Aceptable para indicadores; no para controlar nada crítico sin autenticación.

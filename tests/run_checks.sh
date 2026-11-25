@@ -20,6 +20,7 @@ echo "== 2. Protocolo y parser (static_assert)"
 "$GPP" -std=gnu++17 -Wall -Wextra -fsyntax-only -fconstexpr-ops-limit=400000000 -fconstexpr-loop-limit=10000000 tests/trace_link_selftest.cpp
 "$GPP" -std=gnu++17 -Wall -Wextra -fsyntax-only -fconstexpr-ops-limit=400000000 -fconstexpr-loop-limit=10000000 tests/mqtt_json_selftest.cpp
 "$GPP" -std=gnu++17 -Wall -Wextra -fsyntax-only -fconstexpr-ops-limit=400000000 tests/mqtt_rx_selftest.cpp
+"$GPP" -std=gnu++17 -Wall -Wextra -fsyntax-only -fconstexpr-ops-limit=400000000 tests/led_control_selftest.cpp
 echo OK
 
 for s in EmisorC6 CoordinadorC6; do

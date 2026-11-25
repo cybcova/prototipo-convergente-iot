@@ -32,6 +32,7 @@
 #include "mqtt_config.h"
 #include "rfid_json.h"
 #include "mqtt_rx.h"
+#include "led_control.h"
 
 #define RX_PIN 32  // desde TX (GPIO10) del C6
 #define TX_PIN 33  // hacia RX (GPIO11) del C6 (solo ACK)
@@ -107,6 +108,43 @@ static void showEvent(const tracelink::Event &e, const char *linkState) {
   Serial.printf("SEQ: %lu\n", (unsigned long)e.seq);
   Serial.printf("ESTADO: %s\n", linkState);
   Serial.println("CHECKSUM: OK");
+}
+
+// =====================================================================================
+// LEDs controlados por MQTT ("true"/"false" en iot/prototipo-convergente/response)
+// =====================================================================================
+// El callback MQTT (corre en mqttTask, que puede quedar minutos esperando red) NO controla el tiempo:
+// solo deposita la orden en una cola. loop() (cada ~1 ms) es el ÚNICO dueño de los GPIO y del millis().
+static QueueHandle_t ledQueue = nullptr;
+static ledctl::Controller leds;
+static volatile uint32_t ledQueueFull = 0;
+
+static void ledWrite(bool green, bool red) {
+  // Primero se apaga lo que debe apagarse y después se enciende: nunca ambos encendidos, ni un instante.
+  if (!green) digitalWrite(ledctl::GREEN_PIN, LOW);
+  if (!red) digitalWrite(ledctl::RED_PIN, LOW);
+  if (green) digitalWrite(ledctl::GREEN_PIN, HIGH);
+  if (red) digitalWrite(ledctl::RED_PIN, HIGH);
+}
+
+static void ledPoll() {
+  uint8_t raw;
+  while (ledQueue != nullptr && xQueueReceive(ledQueue, &raw, 0) == pdTRUE) {
+    const ledctl::Cmd cmd = static_cast<ledctl::Cmd>(raw);
+    if (leds.apply(cmd, millis())) {          // válida: cambia de LED y reinicia los 2 s
+      ledWrite(leds.greenOn(), leds.redOn());
+      Serial.printf("[LED] Valor recibido: %s -> LED %s (GPIO%d) encendido %lu ms, LED %s apagado\n",
+                    cmd == ledctl::Cmd::TRUE_ ? "true" : "false",
+                    cmd == ledctl::Cmd::TRUE_ ? "VERDE" : "ROJO",
+                    cmd == ledctl::Cmd::TRUE_ ? ledctl::GREEN_PIN : ledctl::RED_PIN,
+                    (unsigned long)ledctl::ON_MS,
+                    cmd == ledctl::Cmd::TRUE_ ? "rojo" : "verde");
+    }
+  }
+  if (leds.update(millis())) {                // se cumplieron los 2 s: ambos apagados
+    ledWrite(false, false);
+    Serial.println("[LED] 2000 ms cumplidos: ambos LEDs apagados");
+  }
 }
 
 // =====================================================================================
@@ -245,6 +283,19 @@ static void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
     Serial.print("[MQTT RX] Contenido: ");
     Serial.write(payload, length);               // contenido completo (UTF-8 válido, sin NUL ni controles)
     Serial.println();
+  }
+
+  // Control de LEDs: comparación exacta por longitud y contenido. Cualquier otro payload se ignora
+  // (no cambia LEDs ni reinicia el temporizador). Aquí solo se encola la orden; loop() la ejecuta.
+  const ledctl::Cmd cmd = ledctl::parse(payload, length);
+  if (cmd == ledctl::Cmd::INVALID) {
+    Serial.println("[LED] Mensaje ignorado: no es exactamente 'true' ni 'false' (LEDs sin cambios)");
+  } else {
+    const uint8_t raw = static_cast<uint8_t>(cmd);
+    if (ledQueue == nullptr || xQueueSend(ledQueue, &raw, 0) != pdTRUE) {
+      ledQueueFull = ledQueueFull + 1;
+      Serial.println("[LED] AVISO: cola de ordenes llena; mensaje no aplicado");
+    }
   }
 }
 
@@ -481,6 +532,12 @@ static void pollLink() {
 }
 
 void setup() {
+  // LEDs: salidas y APAGADOS desde el primer instante (antes que cualquier otra cosa).
+  pinMode(ledctl::GREEN_PIN, OUTPUT);
+  pinMode(ledctl::RED_PIN, OUTPUT);
+  ledWrite(false, false);
+  ledQueue = xQueueCreate(8, sizeof(uint8_t));
+
   Serial.begin(115200);                       // monitor USB (igual que el ejemplo)
   Serial2.setRxBufferSize(1024);              // antes de begin(): margen para ráfagas
   Serial2.begin(LINK_BAUD, SERIAL_8N1, RX_PIN, TX_PIN);  // UART desde el C6 (igual que el ejemplo)
@@ -511,6 +568,7 @@ void setup() {
 }
 
 void loop() {
+  ledPoll();   // sin bloqueos: millis() + cola; apaga los LEDs a los 2 s aunque MQTT esté reconectando
   pollLink();
 
   if (millis() - lastStats >= STATS_EVERY_MS) {

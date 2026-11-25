@@ -93,3 +93,39 @@ Diseño: `DISENO_MQTT_RFID.md` §10. **No probada con el broker real ni con el m
 
 ## Resultados en hardware (recepción)
 _Pendiente de ejecutar._
+
+---
+
+# LEDs por MQTT (GPIO18 verde / GPIO19 rojo)
+
+Diseño: `DISENO_MQTT_RFID.md` §11. **No probada con LEDs ni broker.**
+
+## Ejecutado (local, `bash tests/run_checks.sh`)
+| Categoría | Prueba | Resultado |
+|---|---|---|
+| Compilación | `LilyGoReceptor` con LEDs (313 336 B, 25 804 B RAM estática), 0 advertencias | PASA |
+| Lógica | Parseo exacto: `true`/`false` válidos; `TRUE`, `True`, prefijos, un carácter extra, con `\n` o espacio, `1/0/on`, JSON, vacío y puntero nulo → inválidos | PASA (`static_assert`) |
+| Lógica | La longitud manda y no el NUL (basura fuera de la longitud no cuenta; NUL embebido invalida) | PASA |
+| Lógica | Arranque apagado; `true`→verde, `false`→rojo; exclusivos | PASA |
+| Lógica | Se apaga a **2000 ms exactos** (1999 ms sigue encendido); ya apagado no se vuelve a apagar | PASA |
+| Lógica | Nuevo mensaje válido (también el mismo valor) cambia de LED y **reinicia** los 2 s | PASA |
+| Lógica | Mensaje inválido **no** cambia el estado ni reinicia el temporizador | PASA |
+| Lógica | Correcto al desbordar `millis()` (cruce de 2³²) | PASA |
+| Lógica | Invariante: nunca ambos encendidos en una secuencia mezclada | PASA |
+| Las pruebas pueden fallar | Mutación temporal (`>= 2000` → `> 2000`), fuera del repo | Falla (4 aserciones) |
+| Revisión de código | El callback solo valida y encola; `ledPoll()` (en `loop()`) no usa `delay`, solo `millis()` y `xQueueReceive(…, 0)`; no toca el módem/MQTT/UART | PASA |
+| Revisión de código | Pines a OUTPUT y LOW al principio de `setup()`; al cambiar se apaga antes de encender | PASA |
+| Archivos intocados | `Ejemplos`, `EmisorC6`, `CoordinadorC6`; tópicos y credenciales sin cambios | PASA |
+
+## Pendiente (requiere LilyGO, LEDs y broker)
+1. Al encender/reiniciar la placa: ambos LEDs **apagados** (también durante el arranque del módem).
+2. `mosquitto_pub -h broker.hivemq.com -p 1883 -t iot/prototipo-convergente/response -m true` → verde 2 s, rojo apagado, luego ambos apagados; el monitor muestra `[LED] Valor recibido: true -> LED VERDE (GPIO18)…` y `2000 ms cumplidos`.
+3. Igual con `false` → rojo 2 s.
+4. **Reinicio**: enviar `true`, y a los ~1 s enviar `false`: el verde debe apagarse, el rojo encenderse y permanecer **2 s completos desde el segundo mensaje**. Repetir con el mismo valor dos veces.
+5. **Ignorados**: durante un LED encendido enviar `TRUE`, `hola`, `{"v":true}`, vacío (`-n`) y binario: el LED y su temporizador **no** cambian; el monitor muestra `[LED] Mensaje ignorado…`.
+6. **No bloqueo**: con eventos RFID/simulados fluyendo, comprobar que siguen apareciendo `[EVENTO RFID]`, ACK y `[MQTT] Publicado…` mientras los LEDs actúan; y cortar la red celular con un LED encendido: debe apagarse a los 2 s aunque MQTT esté reconectando.
+7. Verificar con el esquema que GPIO18/19 no estén ligados a otro periférico de la T-SIM7070G (el firmware solo los usa como salida).
+8. Registrar los resultados aquí.
+
+## Resultados en hardware (LEDs)
+_Pendiente de ejecutar._

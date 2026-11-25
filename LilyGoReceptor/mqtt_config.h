@@ -24,6 +24,11 @@ constexpr uint16_t MQTT_PORT = 1883;
 // ("GsmClientTest/<imei>/potenciometro"). Sin comodines (+ #): un tópico de publicación no puede tenerlos.
 constexpr char MQTT_TOPIC_EVENTS[] = "iot/prototipo-convergente/rfid/events";
 
+// ---------- Tópico de RECEPCIÓN (suscripción) ----------
+// Solo se imprime lo que llegue aquí; nunca se republica ni se trata como evento RFID.
+// Debe ser distinto del de publicación (el firmware no debe recibir sus propios eventos).
+constexpr char MQTT_TOPIC_RESPONSE[] = "iot/prototipo-convergente/response";
+
 // ---------- Hardware del módem (idéntico al ejemplo, T-SIM7070G) ----------
 constexpr int MODEM_PWR_PIN = 4;
 constexpr int MODEM_UART_RX = 26;   // GPIO26 <- TX del módem

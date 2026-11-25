@@ -54,3 +54,42 @@ Procedimiento recomendado, de menor a mayor riesgo:
 
 ## 4. Resultados en hardware
 _Pendiente de ejecutar._
+
+---
+
+# Recepción MQTT — tópico `iot/prototipo-convergente/response`
+
+Diseño: `DISENO_MQTT_RFID.md` §10. **No probada con el broker real ni con el módem.**
+
+## Ejecutado (local, `bash tests/run_checks.sh`)
+| Categoría | Prueba | Resultado |
+|---|---|---|
+| Compilación | `LilyGoReceptor` con la recepción (312 496 B, 25 788 B RAM estática), 0 advertencias | PASA |
+| Formato | Tópico de respuesta exacto; publicación RFID intacta; **suscripción ≠ publicación** y sin comodines | PASA (`static_assert`) |
+| Formato | Clasificación: vacío, texto, JSON (con espacios/saltos/UTF-8), no-JSON, UTF-8 válido de 2/3/4 bytes | PASA |
+| Formato | No texto: NUL (también embebido), campana, ESC, DEL, 0xFF, secuencias incompletas o cortadas en el límite, sobrelargas (C0, E0), sustitutos, > U+10FFFF, binario puro | PASA |
+| Formato | Nunca lee fuera de la longitud dada (multibyte cortado en el límite); payload de 470 B | PASA |
+| Las pruebas pueden fallar | Mutación temporal del validador UTF-8 (fuera del repo) | Falla como se espera |
+| Revisión de código | La suscripción ocurre **después** de `mqttConnect()` exitoso y en **cada** reconexión (`mqttSubscribed = false` mientras `!mqtt.connected()` + `subscribeResponse()` tras conectar); reintento si `subscribe()` falla | PASA |
+| Revisión de código | El callback solo imprime y cuenta; no llama a `pendPush`, `publish` ni toca la cola; corre dentro de `mqtt.loop()` en `mqttTask`, no en `loop()` | PASA |
+| Archivos intocados | `Ejemplos/lilygoTelcel`, `EmisorC6`, `CoordinadorC6` | PASA (`git status`) |
+
+## Pendiente (requiere LilyGO + SIM con datos + broker)
+1. Cargar `LilyGoReceptor`. Esperar `[MQTT] Conectando a MQTT... exito!` seguido de `[MQTT] Suscrito a iot/prototipo-convergente/response` (la suscripción debe aparecer **después** de conectar). `[ESTADISTICAS MQTT RX]` debe decir `suscrito=si`.
+2. Desde otro equipo, publicar (sin `-r`; el broker es público):
+   - Texto JSON: `mosquitto_pub -h broker.hivemq.com -p 1883 -t iot/prototipo-convergente/response -m '{"ok":true}'`
+   - Texto plano: `… -m 'hola'`
+   - UTF-8: `… -m 'canción ñ'`
+   - Vacío: `… -n`
+   - Binario: `… -f archivo.bin` (o `-m "$(printf '\001\377')"`)
+   - Grande (> 470 B): debe **no** aparecer nada (descartado por PubSubClient).
+   También sirve el cliente web de HiveMQ (`broker.hivemq.com`, puerto 8884/WebSocket).
+3. Esperado en el monitor, por mensaje: `[MQTT RX] Topico: …`, `Longitud: N bytes`, `Tipo: …` y `Contenido: …` (hex si es binario).
+4. Con eventos RFID/simulados fluyendo a la vez: los `[EVENTO RFID]`, ACK y `[MQTT] Publicado seq …` deben seguir **sin interrupciones** al recibir mensajes.
+5. Comprobar que el mensaje recibido **no** aparece en `…/rfid/events` (suscribirse a ambos tópicos).
+6. **Reconexión**: cortar la red (antena/SIM) y restablecerla; tras `[MQTT] … exito!` debe aparecer de nuevo `Suscrito a …` y un mensaje nuevo debe recibirse. Contar `suscripciones ok` en las estadísticas.
+7. **Retenidos** (opcional): publicar con `-r`, reiniciar la conexión y observar que reaparece en cada suscripción; **limpiar** con `mosquitto_pub … -t iot/prototipo-convergente/response -n -r`.
+8. Registrar los logs en este archivo.
+
+## Resultados en hardware (recepción)
+_Pendiente de ejecutar._

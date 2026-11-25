@@ -31,6 +31,7 @@
 #include "trace_link.h"
 #include "mqtt_config.h"
 #include "rfid_json.h"
+#include "mqtt_rx.h"
 
 #define RX_PIN 32  // desde TX (GPIO10) del C6
 #define TX_PIN 33  // hacia RX (GPIO11) del C6 (solo ACK)
@@ -120,6 +121,9 @@ enum MqttPhase : uint8_t { PH_INIT = 0, PH_NO_NETWORK, PH_NO_DATA, PH_NO_MQTT, P
 static volatile uint8_t mqttPhase = PH_INIT;
 static volatile uint32_t mqttPublished = 0, mqttPublishFail = 0, mqttGaveUp = 0, mqttBuildErr = 0;
 static volatile uint32_t pendDropped = 0, mqttDupSkipped = 0;
+// Recepción MQTT (solo mqttTask escribe estos contadores; el callback corre dentro de mqtt.loop()).
+static volatile uint32_t mqttRxCount = 0, mqttRxBinary = 0, mqttSubscribeOk = 0, mqttSubscribeFail = 0;
+static volatile bool mqttSubscribed = false;
 static String imei = "";
 static String tipoDeRedActual;
 
@@ -210,6 +214,55 @@ static bool mqttConnect() {
   return true;
 }
 
+// ---- Recepción MQTT: callback de PubSubClient ----
+// Se ejecuta DENTRO de mqtt.loop() (en mqttTask), nunca en loop(): no puede retrasar la UART ni el RFID.
+// Solo IMPRIME. Un mensaje recibido NO es un evento RFID: no se encola ni se republica. El payload no
+// viene terminado en NUL y puede no ser texto: se clasifica antes de mostrarlo (mqtt_rx.h).
+// Límite de PubSubClient: un paquete que no cabe en el buffer (MQTT_BUFFER_BYTES) se DESCARTA en
+// silencio antes de llegar aquí (≈ 470 B de payload con este tópico).
+static void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
+  mqttRxCount = mqttRxCount + 1;
+  const mqttrx::Kind kind = mqttrx::classify(payload, length);
+
+  Serial.println();
+  Serial.print("[MQTT RX] Topico: ");
+  Serial.println(topic);                         // PubSubClient lo entrega como cadena terminada en NUL
+  Serial.printf("[MQTT RX] Longitud: %u bytes\n", length);
+  Serial.printf("[MQTT RX] Tipo: %s\n", mqttrx::kindName(kind));
+
+  if (kind == mqttrx::Kind::EMPTY) {
+    Serial.println("[MQTT RX] Contenido: (vacio)");
+  } else if (kind == mqttrx::Kind::BINARY) {
+    mqttRxBinary = mqttRxBinary + 1;
+    // No se imprime como texto (podría contener controles/escapes de terminal): volcado hexadecimal.
+    const unsigned int shown = length < 64 ? length : 64;
+    Serial.print("[MQTT RX] Contenido (hex");
+    if (shown < length) Serial.printf(", primeros %u de %u", shown, length);
+    Serial.print("): ");
+    for (unsigned int i = 0; i < shown; i++) Serial.printf("%02X ", payload[i]);
+    Serial.println();
+  } else {
+    Serial.print("[MQTT RX] Contenido: ");
+    Serial.write(payload, length);               // contenido completo (UTF-8 válido, sin NUL ni controles)
+    Serial.println();
+  }
+}
+
+// Se suscribe al tópico de respuesta. QoS 0. true = SUBSCRIBE escrito en el socket (PubSubClient no
+// expone el SUBACK, así que no confirma que el broker aceptó la suscripción).
+static bool subscribeResponse() {
+  if (mqtt.subscribe(MQTT_TOPIC_RESPONSE)) {
+    mqttSubscribed = true;
+    mqttSubscribeOk = mqttSubscribeOk + 1;
+    Serial.printf("[MQTT] Suscrito a %s\n", MQTT_TOPIC_RESPONSE);
+    return true;
+  }
+  mqttSubscribed = false;
+  mqttSubscribeFail = mqttSubscribeFail + 1;
+  Serial.printf("[MQTT] Fallo al suscribirse a %s (se reintenta)\n", MQTT_TOPIC_RESPONSE);
+  return false;
+}
+
 // Publica lo pendiente en orden. Un evento solo sale de la cola cuando publish() devolvió true.
 // true de publish() = bytes escritos en el socket (QoS 0): NO es confirmación del broker.
 static void publishPending() {
@@ -272,6 +325,7 @@ static void mqttTask(void *) {
   modem.setPreferredMode(3);  // LTE-M > NB-IoT > GSM
 
   mqtt.setServer(MQTT_BROKER, MQTT_PORT);
+  mqtt.setCallback(onMqttMessage);   // recepción de MQTT_TOPIC_RESPONSE (se procesa dentro de mqtt.loop())
   if (!mqtt.setBufferSize(MQTT_BUFFER_BYTES)) Serial.println("[MQTT] ERROR: setBufferSize fallo; las publicaciones fallaran");
   // La red, los datos y MQTT se conectan/reconectan en el bucle, como en el ejemplo.
 
@@ -303,17 +357,27 @@ static void mqttTask(void *) {
     // 3) MQTT
     if (!mqtt.connected()) {
       mqttPhase = PH_NO_MQTT;
+      mqttSubscribed = false;   // la sesión es "clean": al reconectar hay que volver a suscribirse
       uint32_t t = millis();
       if (t - lastReconnectAttempt > MQTT_RETRY_MS) {
         lastReconnectAttempt = t;
-        if (mqttConnect()) lastReconnectAttempt = 0;
+        if (mqttConnect()) {
+          lastReconnectAttempt = 0;
+          subscribeResponse();   // en CADA conexión/reconexión, justo después de conectar
+        }
       }
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
 
     mqttPhase = PH_READY;
-    mqtt.loop();
+    // Si la suscripción falló al conectar, reintenta con la misma cadencia que la reconexión.
+    static uint32_t lastSubAttempt = 0;
+    if (!mqttSubscribed && millis() - lastSubAttempt > MQTT_RETRY_MS) {
+      lastSubAttempt = millis();
+      subscribeResponse();
+    }
+    mqtt.loop();   // procesa keepalive y mensajes entrantes (onMqttMessage); no bloquea loop() (UART)
     publishPending();
     vTaskDelay(pdMS_TO_TICKS(10));
   }
@@ -458,6 +522,9 @@ void loop() {
       Serial.printf("[ESTADISTICAS MQTT] estado=%s | publicados=%lu | pendientes=%u | descartados_cola=%lu | fallos_publish=%lu | abandonados=%lu | dup_enlace_no_publicados=%lu\n",
                     phaseName(mqttPhase), (unsigned long)mqttPublished, (unsigned)pendCount(), (unsigned long)pendDropped,
                     (unsigned long)mqttPublishFail, (unsigned long)mqttGaveUp, (unsigned long)mqttDupSkipped);
+      Serial.printf("[ESTADISTICAS MQTT RX] suscrito=%s a %s | recibidos=%lu (binarios=%lu) | suscripciones ok=%lu fallo=%lu\n",
+                    mqttSubscribed ? "si" : "no", MQTT_TOPIC_RESPONSE, (unsigned long)mqttRxCount,
+                    (unsigned long)mqttRxBinary, (unsigned long)mqttSubscribeOk, (unsigned long)mqttSubscribeFail);
     }
   }
   delay(1);

@@ -100,3 +100,26 @@ Son operaciones independientes: el ACK **no** espera ni refleja MQTT.
 - Sin timestamp absoluto; los tiempos son uptime del coordinador.
 - Un solo hilo de eventos y un solo emisor soportado en la detección de saltos del coordinador.
 - La pulsación de `PWR_PIN` al arrancar es la del ejemplo y podría apagar un módem ya encendido (no verificado).
+
+---
+
+## 10. Recepción MQTT (tópico `iot/prototipo-convergente/response`)
+
+Estado: implementado y compilado; **no probado con el broker real**.
+
+- **Suscripción**: constante `MQTT_TOPIC_RESPONSE` (`mqtt_config.h`), QoS 0, en la **misma conexión** MQTT (mismo módem, broker, puerto y Client ID). Se ejecuta **justo después de cada `mqttConnect()` exitoso**, es decir, en la primera conexión y en cada reconexión (la sesión es *clean*: el broker olvida las suscripciones al caer la conexión). Si `subscribe()` devuelve `false`, se reintenta cada 10 s mientras haya conexión (`[ESTADISTICAS MQTT RX]` muestra `suscrito=si|no`). `subscribe()` true significa "SUBSCRIBE escrito en el socket"; PubSubClient no expone el SUBACK.
+- **Callback** (`onMqttMessage`, registrado con `mqtt.setCallback`): lo invoca PubSubClient **dentro de `mqtt.loop()`**, que ya se llamaba continuamente en `mqttTask`; por tanto nunca corre en `loop()` (UART/RFID) y no la retrasa. Imprime: **tópico**, **longitud en bytes**, **tipo** y **contenido**.
+- **Qué NO hace**: no encola, no publica y no trata el mensaje como evento RFID. No toca el tópico `iot/prototipo-convergente/rfid/events` (comprobado con `static_assert`: los dos tópicos son distintos y la suscripción no usa comodines, así que el LilyGO no recibe sus propios eventos).
+- **Contenido que no es texto JSON** (`mqtt_rx.h`, probado con `static_assert`):
+
+| Tipo detectado | Criterio | Qué se imprime |
+|---|---|---|
+| VACIO | longitud 0 | `Contenido: (vacio)` |
+| TEXTO (parece JSON, sin validar) | UTF-8 válido sin controles (salvo `\t \r \n`) y empieza con `{`/`[` y termina con `}`/`]` | el texto completo |
+| TEXTO (no parece JSON) | UTF-8 válido sin controles | el texto completo |
+| BINARIO / no es texto UTF-8 | UTF-8 inválido (incompleto, sobrelargo, sustitutos, > U+10FFFF), NUL, ESC u otros controles | **volcado hexadecimal** (máx. 64 bytes, indicando el total); no se escribe crudo para no enviar controles/escapes al terminal |
+
+  "Parece JSON" es solo una heurística de presentación: **no se valida ni se interpreta el JSON**.
+- **Límite de tamaño**: PubSubClient **descarta en silencio** los paquetes que no caben en su buffer de 512 B (≈ **470 B de payload** con este tópico); el callback no se invoca y no hay forma de detectarlo desde el firmware.
+- **Mensajes retenidos**: si alguien publica con `retain`, el broker los reenvía en **cada suscripción** (cada reconexión); el callback de PubSubClient 2.8 no informa si el mensaje es retenido.
+- **Seguridad**: broker público sin autenticación: **cualquiera puede publicar** en `…/response` y el contenido aparecerá en el monitor. No se actúa sobre él (solo se imprime), pero no debe usarse para tomar decisiones sin autenticación.

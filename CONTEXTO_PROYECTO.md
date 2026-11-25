@@ -23,6 +23,15 @@ Se implementó la primera versión de extremo a extremo (compila; **no probada e
 - Sin timestamp de lectura RFID (el emisor no lo envía); los tiempos son uptime del coordinador. Sin reintentos (v1).
 - Emisor sin cambios en este paso. Compilar/validar: `bash tests/run_checks.sh`.
 
+### 0.2 Publicación MQTT desde el LilyGO — implementado y compilado, **no probado con red celular/broker**
+- Flujo completo: YRM10002 → emisor C6 → Zigbee `0xFC10` → coordinador C6 → UART → **LilyGO 7070 → MQTT (red celular) → broker**. El enlace RFID→Zigbee→coordinador→LilyGO ya se comprobó físicamente (LilyGO recibe y devuelve ACK).
+- `LilyGoReceptor/LilyGoReceptor.ino` ahora publica cada evento válido. Réplica de `Ejemplos/lilygoTelcel` (auditado en `AUDITORIA_LILYGO_TELCEL.md`): TinyGSM SIM7070 + PubSubClient, módem en `Serial1` (GPIO26/27, PWR GPIO4), APN Telcel, broker público `broker.hivemq.com:1883` sin TLS ni credenciales MQTT, Client ID = IMEI, mismas pausas (180 s red / 10 s APN / 10 s MQTT). Configuración en `LilyGoReceptor/mqtt_config.h` (única copia; no se imprime ni se documenta el usuario/clave del APN).
+- **Tópico fijo y exclusivo: `iot/prototipo-convergente/rfid/events`** (distinto del `GsmClientTest/<imei>/potenciometro` del ejemplo). QoS 0, `retain=false`. JSON documentado en `DISENO_MQTT_RFID.md` (`msgId`, `seq`, `epc`, `rssiReader`, `rssiZigbee`, `origin`, `status`, `senderNwk`, `senderIeee`, `coordinatorIeee`, `coordinatorSession`, `coordinatorRxUptime`, `coordinatorTxUptime`; sin IMEI ni hora absoluta).
+- Arquitectura: `loop()` (UART, valida, muestra, **encola**, ACK) y `mqttTask` (core 1; único usuario del módem/MQTT). Cola en RAM de 32 eventos con mutex; llena = descarta el más antiguo (registra seq/MSG ID). **El ACK UART significa "línea válida recibida", no publicación MQTT; `publish()` true tampoco es confirmación del broker.**
+- Cambios deliberados respecto al ejemplo: tarea separada en el core 1 (el core 0 tiene watchdog idle activo y TinyGSM no cede a la tarea idle), `setBufferSize(512)` (el JSON no cabe en 256 B), `retain=false`.
+- Riesgo de seguridad vigente: broker público sin autenticación ni TLS (cualquiera puede leer/inyectar en el tópico).
+- Pruebas: `bash tests/run_checks.sh` (incluye `tests/mqtt_json_selftest.cpp`); pendientes físicas en `PRUEBAS_MQTT_RFID.md`. Emisor, coordinador y ejemplos: sin cambios en esta etapa.
+
 ## 1. Resumen ejecutivo (estado al momento de la auditoría; ver sección 0)
 Repositorio de prototipado IoT con ESP32-C6. Hoy contiene (a) un lector RFID UHF funcionando por UART que imprime EPC/RSSI por Serial, y (b) un ejemplo didáctico Zigbee de terceros (coordinador-interruptor + router-relé). **No están integrados.** El objetivo aparente (RFID → Zigbee → coordinador) es **[INFERIDO]**, no documentado.
 

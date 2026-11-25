@@ -1,0 +1,100 @@
+# CONTEXTO_PROYECTO — transferencia de contexto (humano / asistente IA)
+
+Fecha de corte: 2026-11-24 · Rama `main` · Commit `3bbda7f`.
+Regla de lectura: lo marcado **[HECHO]** está en el código; **[INFERIDO]** es deducción; **[DESCONOCIDO]** no hay información.
+Detalle y hallazgos: ver `AUDITORIA_TECNICA.md`. Plan: `ROADMAP.md`.
+
+## 0. ACTUALIZACIÓN 2026-11-24 — integración RFID↔Zigbee v1 (prevalece sobre lo que contradiga abajo)
+Se implementó la primera versión de extremo a extremo (compila; **no probada en hardware**):
+- `EmisorC6/EmisorC6.ino`: lector YRM10002 (mismos pines/baud/comando) + nodo Zigbee **End Device explícito** (= el rol efectivo del actuador del ejemplo, cuyo `begin()` sin argumento usa ese default). `loop()` solo lee UART; `zigbeeTask` inicia Zigbee y envía desde una cola de 8 (descarta el más antiguo). Dedupe 1 s; reenvía el inventario si el lector calla 5 s (resuelve A8); reinicia si no hay red en 180 s o falla `begin()` (A6/A7).
+- `CoordinadorC6/CoordinadorC6.ino` (carpeta recreada, ahora receptor): `begin(ZIGBEE_COORDINATOR)`, canal 11, red abierta 180 s, EP1; callback → cola → impresión en `loop()`.
+- Transporte: comando de cluster personalizado `0xFC10` / cmd `0x01`, unicast a `0x0000` EP1 (sin binding). Formato y limitaciones: `PROTOCOLO_RFID_ZIGBEE.md`. Pruebas y procedimiento: `PRUEBAS_RFID_ZIGBEE.md`; `bash tests/run_checks.sh`.
+- Módulos: `yrm_parser.h` (parser extraído, mismo algoritmo + validaciones), `rfid_zigbee_protocol.h` y `rfid_zigbee_ep.h` (duplicados idénticos en ambas carpetas por limitación de Arduino).
+- Los ejemplos originales en `Ejemplos/` no se modificaron. El usuario confirmó que ese ejemplo (coordinador+actuador, latidos) funciona en hardware; eso no se re-verificó aquí.
+- **Validado en hardware con `RFID_SIMULATION_MODE = true`** (EPC ficticios 1/s, emisor→coordinador, `ORIGEN: SIMULADO`); `data.size` incluye el prefijo. Detalle en `PRUEBAS_RFID_ZIGBEE.md`. El coordinador imprime con `log_printf` (macro `DIAG`) porque `Serial` (UART0) no sale por el puerto USB nativo, mientras los logs del stack sí.
+- Pendiente: lectura con etiquetas reales (`RFID_SIMULATION_MODE = false`; hay problemas de detección con la antena, ajeno a Zigbee), prueba de larga duración/recuperación, unidad del RSSI del lector, A3 (partición), A10 (pines de strapping GPIO4/5).
+- El emisor tiene `RFID_SIMULATION_MODE` (constante al inicio de `EmisorC6.ino`, hoy `true`) que mete EPC ficticios en la misma cola; `FLAG_SIMULATED` = bit1 de `flags`.
+- Flujo: tag → YRM10002 → UART1 (RX4/TX5) → parser → cola → Zigbee (EP10 → EP1 del coordinador) → Serial del coordinador.
+
+## 1. Resumen ejecutivo (estado al momento de la auditoría; ver sección 0)
+Repositorio de prototipado IoT con ESP32-C6. Hoy contiene (a) un lector RFID UHF funcionando por UART que imprime EPC/RSSI por Serial, y (b) un ejemplo didáctico Zigbee de terceros (coordinador-interruptor + router-relé). **No están integrados.** El objetivo aparente (RFID → Zigbee → coordinador) es **[INFERIDO]**, no documentado.
+
+## 2. Arquitectura
+```mermaid
+flowchart LR
+  TAG[(Tag UHF)] -.-> YRM[YRM10002] -- "UART1 115200 RX4/TX5" --> C6A[ESP32-C6 EmisorC6] -- USB Serial --> PC[Monitor]
+  BTN[Botón GPIO18] --> COORD[C6 Coordinador EP1] -- "Zigbee ch11 Toggle+Level" --> ROUT[C6 Actuador EP10] --> REL[Relé GPIO4] --> FOCO[Foco AC]
+  C6A -. "pendiente: EPC por Zigbee" .-> COORD
+```
+
+## 3. Hardware
+- ESP32-C6 dev board (modelo exacto **[DESCONOCIDO]**), "ESP32C6 Dev Module" en IDE.
+- Lector YRM10002 (UART 115200 8N1). Alimentación y cableado físico **[DESCONOCIDO]**.
+- Grove Relay HLS8L-DC3V-S-C + foco AC (solo ejemplo; 110/220 V, ver precauciones en `Ejemplos/Zigbee_Rele-main/README.md`).
+
+| Nodo | GPIO | Uso |
+|---|---|---|
+| EmisorC6 | 4 / 5 | UART1 RX / TX al lector |
+| Coordinador lab | 18 | Botón (INPUT_PULLUP, activo LOW) |
+| Actuador lab | 4 | Relé; `LED_BUILTIN`/15 LED |
+
+Aviso: GPIO4/5/15 son pines de strapping del C6 (verificar datasheet de la placa).
+
+## 4. Software y versiones
+- Arduino IDE + core **esp32 (Espressif) 3.3.8** instalado localmente (el repo no lo fija). Librería `Zigbee` del core (ZBOSS / esp-zigbee-sdk). Sin PlatformIO/CMake/sdkconfig.
+- Opciones de IDE según README del ejemplo: Board `ESP32C6 Dev Module`; Partition `Zigbee 4MB with spiffs` (ver duda A3: puede requerir `Zigbee ZCZR 4MB with spiffs`); Erase All Flash `Enabled`; Zigbee mode `ZCZR` (la opción "Zigbee Router" del README no existe en 3.3.8).
+
+## 5. Estructura de archivos
+```
+EmisorC6/EmisorC6.ino                         Lector RFID (propio)
+Ejemplos/Zigbee_Rele-main/README.md           Práctica de laboratorio (UAEH, terceros)
+Ejemplos/Zigbee_Rele-main/Zigbee_Coordinador/Zigbee_Coordinador.ino
+Ejemplos/Zigbee_Rele-main/Zigbee_Actuador/Zigbee_Actuador.ino
+(borrado) CoordinadorC6/CoordinadorC6.ino     git show 594dbf2:CoordinadorC6/CoordinadorC6.ino
+```
+
+## 6. Componentes y responsabilidades
+- **EmisorC6**: envía comando de inventario múltiple (10 000 rondas) `BB 00 27 00 03 22 27 10 83 7E`; parsea tramas `BB type cmd lenH lenL data checksum 7E` (longitud total = 7 + len); en `type=0x02 cmd=0x22` extrae RSSI (`frame[5]`), PC (`frame[6..7]`), EPC (`frame[8..]`, longitud `((PC>>11)&0x1F)*2`).
+- **Zigbee_Coordinador**: `ZigbeeColorDimmerSwitch` EP1, `begin(ZIGBEE_COORDINATOR)`, canal 11, `setRebootOpenNetwork(180)`; botón → `lightToggle()`; cada 5 s `setLightLevel(1..254)` como "latido" (solo si `bound()`).
+- **Zigbee_Actuador**: `ZigbeeDimmableLight` EP10, callback `onLightChange` acciona relé y registra latidos; aviso de pérdida tras 15 s sin latido. **Bug: `Zigbee.begin()` sin rol → End Device.**
+- **Coordinador propio (borrado)**: `ZigbeeSwitch` EP1, modelo "RFID_Coord", reinicia ante fallo, imprime estado cada 2 s.
+
+## 7. Configuraciones relevantes
+- Canal Zigbee fijo 11 (`1<<11`) en ambos nodos. PAN ID / Ext PAN ID: automáticos. Seguridad: por defecto (no tocada).
+- Persistencia de red del stack en `zb_storage`; "Erase All Flash" la borra en cada carga.
+- Roles: elegidos por modo de compilación (ED / ZCZR) **y** por `Zigbee.begin(rol)`; no hay cambio dinámico.
+
+## 8. Estado actual
+- Funciona (según código, **no verificado en hardware**): lectura RFID; ejemplo lab (si se corrige rol/partición).
+- No existe: integración RFID↔Zigbee, reporting, pruebas, documentación del proyecto propio.
+
+## 9. Problemas conocidos (resumen; IDs en la auditoría)
+A1 rol Router ausente (ALTO) · A2 README con opción inexistente (ALTO) · A3 partición posiblemente incorrecta (MEDIO) · A4 sin integración (ALTO) · A8 inventario RFID se agota (MEDIO) · A6/A7 esperas infinitas sin reinicio (MEDIO) · A10 strapping pins (MEDIO, sospecha).
+
+## 10. Decisiones técnicas existentes
+- Arduino-ESP32 en vez de ESP-IDF puro. Canal fijo para aislar equipos. Uso del cluster Level como canal de latido (decisión del material del curso). Red abierta 180 s tras cada arranque del coordinador.
+- Nota de gobierno (CLAUDE.md corporativo): tecnologías nuevas requieren aprobación; el repo es un prototipo/POC personal, usar rama `poc/` y commits `[POC]` si se aplica el flujo FINDEP.
+
+## 11. Pendientes
+Ver `ROADMAP.md`. Preguntas abiertas: objetivo real, placa exacta, cableado/alimentación del lector, versión del core usada, resultados de pruebas previas, por qué se borró `CoordinadorC6`.
+
+## 12. Próximos pasos recomendados
+1. Fijar entorno reproducible (documentar versión de core y opciones).
+2. Validar el ejemplo lab tal cual en hardware y guardar logs.
+3. Corregir rol Router y partición en el Actuador y repetir.
+4. Diseñar el paquete de datos RFID sobre Zigbee antes de codificar.
+
+## 13. Comandos (referencia; no se ejecutaron en la auditoría)
+Arduino IDE es el flujo documentado. Equivalente CLI (**[INFERIDO]**, requiere `arduino-cli`, que no se encontró instalado en PATH):
+```bash
+# Compilar (ejemplo coordinador; FQBN con opciones)
+arduino-cli compile --fqbn esp32:esp32:esp32c6:ZigbeeMode=zczr,PartitionScheme=zigbee_zczr,EraseFlash=none \
+  Ejemplos/Zigbee_Rele-main/Zigbee_Coordinador
+# Cargar (ajustar COM)
+arduino-cli upload  -p COMx --fqbn esp32:esp32:esp32c6:ZigbeeMode=zczr,PartitionScheme=zigbee_zczr Ejemplos/Zigbee_Rele-main/Zigbee_Coordinador
+# Monitor
+arduino-cli monitor -p COMx -c baudrate=115200
+```
+Los identificadores de menú (`ZigbeeMode`, `PartitionScheme`, `zigbee_zczr`) provienen de `boards.txt` del core 3.3.8. Para lector RFID: Serial 115200; ZigbeeMode=Disabled basta.
+Orden de arranque del ejemplo: coordinador primero, luego actuador, esperar ~30 s antes de pulsar.
+Recuperar coordinador propio: `git show 594dbf2:CoordinadorC6/CoordinadorC6.ino`.

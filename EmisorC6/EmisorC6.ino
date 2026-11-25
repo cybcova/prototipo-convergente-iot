@@ -5,9 +5,11 @@
 // (igual que el actuador del ejemplo que ya funciona), partición y flash como en el ejemplo.
 //
 // Concurrencia:
-//   loop()        -> SOLO lee UART y parsea (nunca espera a Zigbee). Encola EPC detectados.
-//   zigbeeTask    -> inicia Zigbee, espera conexión y envía lo que hay en la cola.
-// Si Zigbee no está listo, loop() sigue leyendo; la cola descarta lo más antiguo.
+//   loop()        -> lee UART, parsea y (opcional) genera EPC simulados; nunca espera a Zigbee.
+//                    Es el ÚNICO productor de la cola (reales y simulados).
+//   zigbeeTask    -> inicia Zigbee, espera conexión y es el ÚNICO consumidor: envía lo de la cola.
+// Si Zigbee no está listo, loop() sigue leyendo. Cola llena: un EPC real desplaza al más antiguo;
+// un EPC simulado nunca desplaza nada (se descarta el simulado).
 
 #ifndef ZIGBEE_MODE_ZCZR
 #ifndef ZIGBEE_MODE_ED
@@ -20,14 +22,15 @@
 #include "rfid_zigbee_ep.h"
 #include "yrm_parser.h"
 
-// ---------------- MODO DE PRUEBA (cambiar SOLO esta constante y recompilar) ----------------
-// true : genera EPC ficticios cada SIM_INTERVAL_MS y los envía por Zigbee con el mismo mecanismo
-//        que los EPC reales (misma cola, protocolo, comando 0xFC10, destino y callbacks).
-//        No se envía el inventario al lector ni se procesa su UART. Los mensajes llevan
-//        FLAG_SIMULATED y el coordinador imprime "ORIGEN: SIMULADO".
-// false: lectura real con el YRM10002 (comportamiento original).
-constexpr bool RFID_SIMULATION_MODE = true;
-constexpr unsigned long SIM_INTERVAL_MS = 1000;
+// ---------------- SIMULACIÓN OPCIONAL (cambiar SOLO esta constante y recompilar) ----------------
+// La lectura REAL del YRM10002 (UART1, inventario, parser, reanudación) está SIEMPRE activa.
+// Esta constante controla únicamente los EPC ficticios:
+//   true : además de las lecturas reales, genera un EPC ficticio cada SIM_INTERVAL_MS y lo envía por
+//          Zigbee con el mismo mecanismo (misma cola, sendTag(), protocolo, comando 0xFC10, destino
+//          y callbacks). Llevan FLAG_SIMULATED; el coordinador imprime "ORIGEN: SIMULADO".
+//   false: no se generan mensajes ficticios.
+constexpr bool RFID_SIMULATION_MODE = false;
+constexpr unsigned long SIM_INTERVAL_MS = 8000;
 
 // ---------------- Lector RFID (sin cambios respecto al original) ----------------
 HardwareSerial RFID(1);
@@ -144,17 +147,9 @@ static void zigbeeTask(void *) {
         m.epcLen = it.epcLen;
         memcpy(m.epc, it.epc, it.epcLen);
 
-        if (it.simulated) {
-          // El msgId se asigna aquí (al enviar), por eso el bloque [SIM] se imprime en este punto.
-          Serial.println();
-          Serial.println("[SIM] Generando RFID ficticio");
-          Serial.printf("[SIM] EPC: %s\n", hex);
-          Serial.printf("[SIM] RSSI: %d\n", (int)it.rssi);
-          Serial.printf("[SIM] MSG ID: %u\n", (unsigned)nextId);
-          Serial.println("[ZIGBEE] Enviando mensaje...");
-        } else {
-          Serial.printf("[ZIGBEE] Enviando RFID (id %u)...\n", (unsigned)nextId);
-        }
+        // El msgId se asigna aquí (al enviar): es un contador único para reales y simulados.
+        Serial.printf("[ZIGBEE] Enviando mensaje %s (MSG ID %u) EPC %s...\n",
+                      it.simulated ? "SIMULADO" : "REAL", (unsigned)nextId, hex);
         if (zbRfid.sendTag(m)) {
           sentAccepted++;
           nextId++;  // wrap natural de uint16_t
@@ -193,7 +188,8 @@ static void onTagDetected(const yrm::Tag &tag) {
 
   char hex[2 * rfidzb::EPC_MAX + 1];
   printHex(tag.epc, tag.epcLen, hex, sizeof(hex));
-  Serial.printf("\n[RFID] EPC detectado: %s | RSSI: %d dBm\n", hex, (int)tag.rssi);
+  Serial.printf("\n[RFID REAL] EPC detectado: %s | RSSI: %d dBm\n", hex, (int)tag.rssi);
+  Serial.println("[ZIGBEE] Encolando lectura real");
 
   TagItem it;
   memset(&it, 0, sizeof(it));
@@ -219,18 +215,31 @@ static void generateSimulatedTag() {
   it.rssi = (int8_t)(-45 - (int)((n * 2) % 16));  // -45..-59, variación determinista
   it.simulated = true;
   n++;
+
+  char hex[2 * rfidzb::EPC_MAX + 1];
+  printHex(it.epc, it.epcLen, hex, sizeof(hex));
+  Serial.printf("\n[SIM] EPC ficticio generado: %s | RSSI: %d\n", hex, (int)it.rssi);
+  Serial.println("[ZIGBEE] Encolando lectura simulada");
   enqueueItem(it);
 }
 
-// Nunca bloquea: si la cola está llena se descarta el elemento más antiguo.
+// Nunca bloquea. Solo loop() produce (un único productor); zigbeeTask consume. Las colas de
+// FreeRTOS son seguras entre tareas, y el productor único evita carreras sobre contadores.
+// Cola llena: un EPC REAL desplaza al más antiguo; un EPC SIMULADO se descarta a sí mismo, para
+// que la simulación nunca expulse lecturas reales.
 static void enqueueItem(const TagItem &it) {
-  if (xQueueSend(tagQueue, &it, 0) != pdTRUE) {
-    TagItem old;
-    xQueueReceive(tagQueue, &old, 0);
-    xQueueSend(tagQueue, &it, 0);
-    droppedQueue = droppedQueue + 1;  // un solo escritor (loop)
-    Serial.printf("[RFID] Cola llena: descartado el mas antiguo (total descartes: %lu)\n", (unsigned long)droppedQueue);
+  if (xQueueSend(tagQueue, &it, 0) == pdTRUE) return;
+
+  if (it.simulated) {
+    droppedQueue = droppedQueue + 1;
+    Serial.println("[SIM] Cola llena: EPC simulado descartado (no se desplazan lecturas existentes)");
+    return;
   }
+  TagItem old;
+  xQueueReceive(tagQueue, &old, 0);
+  xQueueSend(tagQueue, &it, 0);
+  droppedQueue = droppedQueue + 1;  // un solo escritor (loop)
+  Serial.printf("[RFID] Cola llena: descartado el mas antiguo (total descartes: %lu)\n", (unsigned long)droppedQueue);
 }
 
 void setup() {
@@ -246,15 +255,9 @@ void setup() {
   delay(1000);
 
   Serial.println();
-  if (RFID_SIMULATION_MODE) {
-    Serial.println("====================================");
-    Serial.println("       RFID SIMULATION MODE");
-    Serial.println("====================================");
-  } else {
-    Serial.println("=================================");
-    Serial.println("        RFID ZIGBEE SENDER");
-    Serial.println("=================================");
-  }
+  Serial.println("=================================");
+  Serial.println("        RFID ZIGBEE SENDER");
+  Serial.println("=================================");
   Serial.printf("Reset reason: %d\n", (int)esp_reset_reason());
 
   tagQueue = xQueueCreate(QUEUE_LEN, sizeof(TagItem));
@@ -265,13 +268,18 @@ void setup() {
     ESP.restart();
   }
 
+  // Lector real: SIEMPRE activo, independiente de RFID_SIMULATION_MODE.
   lastReaderByte = millis();
+  RFID.write(INVENTORY_CMD, sizeof(INVENTORY_CMD));
+  Serial.println("[RFID] Lector YRM10002 inicializado");
+  Serial.println("[RFID] Lectura real: ACTIVA");
   if (RFID_SIMULATION_MODE) {
-    Serial.printf("[SIM] Lector RFID desactivado; EPC ficticios cada %lu ms\n", SIM_INTERVAL_MS);
+    Serial.println("[SIM] Simulacion: ACTIVADA");
+    Serial.printf("[SIM] Intervalo: %lu ms\n", SIM_INTERVAL_MS);
   } else {
-    RFID.write(INVENTORY_CMD, sizeof(INVENTORY_CMD));
-    Serial.println("[RFID] Lector inicializado");
+    Serial.println("[SIM] Simulacion: DESACTIVADA");
   }
+  Serial.println("[ZIGBEE] Inicializando...");
 
   // Registro Zigbee (rápido, no bloquea). El arranque de la red va en zigbeeTask.
   zbRfid.setManufacturerAndModel("UAEH", "RFID_Sender");
@@ -282,17 +290,7 @@ void setup() {
 }
 
 void loop() {
-  if (RFID_SIMULATION_MODE) {
-    // Sin delay(): temporización por millis(). Solo se genera con red, para no acumular datos viejos.
-    static unsigned long lastSim = 0;
-    if (Zigbee.connected() && millis() - lastSim >= SIM_INTERVAL_MS) {
-      lastSim = millis();
-      generateSimulatedTag();
-    }
-    delay(1);
-    return;
-  }
-
+  // Lectura real: SIEMPRE se ejecuta (nada aquí depende de RFID_SIMULATION_MODE).
   while (RFID.available()) {
     uint8_t b = RFID.read();
     lastReaderByte = millis();
@@ -320,6 +318,16 @@ void loop() {
     Serial.println("[RFID] Lector en silencio: reenviando comando de inventario");
     RFID.write(INVENTORY_CMD, sizeof(INVENTORY_CMD));
     lastReaderByte = millis();
+  }
+
+  // Simulación opcional, independiente del lector: millis(), sin delay(). Solo se genera con red,
+  // para no acumular datos viejos. No toca UART, parser, inventario ni la deduplicación real.
+  if (RFID_SIMULATION_MODE) {
+    static unsigned long lastSim = 0;
+    if (Zigbee.connected() && millis() - lastSim >= SIM_INTERVAL_MS) {
+      lastSim = millis();
+      generateSimulatedTag();
+    }
   }
 
   delay(1);  // cede CPU; a 115200 baud el buffer UART (256 B por defecto) aguanta de sobra

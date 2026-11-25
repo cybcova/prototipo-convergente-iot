@@ -56,17 +56,17 @@ Sirve para probar Zigbee extremo a extremo sin depender del YRM10002.
 ## Activación
 En `EmisorC6/EmisorC6.ino`, al inicio:
 ```cpp
-constexpr bool RFID_SIMULATION_MODE = true;   // true = simulado, false = lector real
-constexpr unsigned long SIM_INTERVAL_MS = 1000;
+constexpr bool RFID_SIMULATION_MODE = true;   // true = además de lo real, genera simulados; false = solo real
+constexpr unsigned long SIM_INTERVAL_MS = 8000;
 ```
-Cambiar solo `RFID_SIMULATION_MODE` y recompilar. Entregado con `true`; **para volver al lector real, ponerlo en `false` y recargar**.
+Cambiar solo `RFID_SIMULATION_MODE` y recompilar. **Desde el cambio de arquitectura (abajo) la lectura real del YRM10002 está SIEMPRE activa; la constante solo añade o quita los EPC simulados.** (Las secciones anteriores describen la versión previa, donde eran excluyentes; las salidas de ejemplo siguientes son de esa versión.)
 
 ## Qué hace
-- Cada 1 s (por `millis()`, sin `delay()` bloqueante; solo cuando el emisor ya está conectado) genera un EPC de 12 bytes: `E28068940000501234567890`, `...91`, `...92`... (los 2 últimos bytes son un contador de 16 bits) y RSSI `-45, -47, ... -59` en ciclo. Indefinidamente.
+- Cada 8 s (`SIM_INTERVAL_MS = 8000`; antes 1000 ms, para dejar tiempo a probar con etiquetas reales) (por `millis()`, sin `delay()` bloqueante; solo cuando el emisor ya está conectado) genera un EPC de 12 bytes: `E28068940000501234567890`, `...91`, `...92`... (los 2 últimos bytes son un contador de 16 bits) y RSSI `-45, -47, ... -59` en ciclo. Indefinidamente.
 - Lo mete en **la misma cola** (`tagQueue`) que los EPC reales; `zigbeeTask` lo envía con el mismo `sendTag()` (protocolo v1, cluster `0xFC10`, cmd `0x01`, destino `0x0000` EP1) y los mismos callbacks de estado de envío. No hay segundo mecanismo de transmisión.
 - Marcador de simulación: **bit1 (`FLAG_SIMULATED = 0x02`) del byte `flags` ya existente** en el protocolo. No cambia el formato ni el tamaño del mensaje ni toca el EPC (la versión sigue siendo 1; un coordinador antiguo ignoraría el bit).
-- El `msgId` lo asigna `zigbeeTask` al enviar (consecutivo), por eso el bloque `[SIM]` se imprime en ese momento.
-- En modo simulado no se envía el inventario al lector ni se procesa su UART; pines, parser y código del lector permanecen intactos.
+- El `msgId` lo asigna `zigbeeTask` al enviar (consecutivo).
+- ~~En modo simulado no se envía el inventario~~ (obsoleto: ahora el lector real siempre está activo).
 
 ## Salida esperada
 Emisor:
@@ -97,7 +97,7 @@ Coordinador:
 ## Procedimiento
 1. Carga `CoordinadorC6` en la placa A y arráncala (ventana de unión 180 s). Mismas opciones de IDE que arriba.
 2. Carga `EmisorC6` (con `RFID_SIMULATION_MODE = true`) en la placa B. No necesita lector conectado.
-3. Espera `[ZIGBEE] Conectado al coordinador` en B; a partir de ahí aparece un `[SIM]` por segundo.
+3. Espera `[ZIGBEE] Conectado al coordinador` en B; a partir de ahí aparece un `[SIM]` cada 8 s.
 4. Criterio de éxito: en A llega cada mensaje con el mismo EPC y MSG ID que en B, `ORIGEN: SIMULADO`, sin avisos de salto de id durante varios minutos.
 5. Si A no muestra nada pero B dice "Entrega confirmada", o A muestra `Mensaje rechazado: motivo=…`, copia esas líneas.
 
@@ -110,3 +110,37 @@ Coordinador:
 | Secuencia EPC simulada (12 B, válida para `epcLen` 1..32) y RSSI -45..-59 | Revisada por código; los 12 B pasan `encode/decode` |
 | Modo real disponible | La rama `false` compila siempre (es un `if` sobre constante, no un `#if`); **no ejecutada con `false` en esta sesión** |
 | Zigbee/Recepción en hardware | **NO probado** |
+
+---
+
+# Lectura real permanente + simulación opcional (cambio de arquitectura)
+
+| `RFID_SIMULATION_MODE` | RFID real | RFID simulado |
+|---|---|---|
+| `false` | Activo permanentemente | Desactivado |
+| `true` | Activo permanentemente | Activo cada `SIM_INTERVAL_MS` = 8000 ms |
+
+## Cambios en `EmisorC6/EmisorC6.ino` (único archivo de firmware modificado)
+- `setup()`: UART1, comando de inventario y mensajes de lector ya no dependen del booleano. El booleano solo decide qué se imprime sobre la simulación.
+- `loop()`: se eliminó el `return` anticipado del modo simulado; el bucle UART + parser + reanudación por silencio se ejecuta siempre. El bloque de simulación está al final y solo se evalúa si el booleano es `true`.
+- Cola: sigue habiendo un único productor (`loop()`: reales y simulados) y un único consumidor (`zigbeeTask`); las colas de FreeRTOS son seguras entre tareas. Con la cola llena, un EPC **real** desplaza al más antiguo, pero un EPC **simulado** se descarta a sí mismo, de modo que la simulación nunca expulsa lecturas reales.
+- Deduplicación (1 s): solo en `onTagDetected()` (lecturas reales); la simulación no la toca ni modifica `lastEpc`.
+- `msgId`: contador único en `zigbeeTask`, compartido por reales y simulados (consecutivos entre ambos tipos).
+- Salida en el emisor (Serial): `[RFID] Lector YRM10002 inicializado`, `[RFID] Lectura real: ACTIVA`, `[SIM] Simulacion: ACTIVADA/DESACTIVADA`, `[SIM] Intervalo: 8000 ms`, `[ZIGBEE] Inicializando...`; por lectura real `[RFID REAL] EPC detectado: …` + `[ZIGBEE] Encolando lectura real`; por simulada `[SIM] EPC ficticio generado: …` + `[ZIGBEE] Encolando lectura simulada`; al enviar `[ZIGBEE] Enviando mensaje REAL|SIMULADO (MSG ID n) EPC …`.
+- Coordinador, protocolo, parser, GPIO, roles y red: sin cambios. El coordinador distingue por `FLAG_SIMULATED`; imprime `ORIGEN: SIMULADO` o `ORIGEN: lector RFID real, ...` (el texto exacto es ese último, no `LECTOR RFID REAL`).
+
+## Validación sin hardware
+| Prueba | Resultado |
+|---|---|
+| A. Compila con `RFID_SIMULATION_MODE = true` (0 advertencias) | PASA (692 858 B, 52 %) |
+| B. Compila con `RFID_SIMULATION_MODE = false` (copia temporal fuera del repo, 0 advertencias) | PASA (692 336 B) |
+| Revisión de código: `RFID_SIMULATION_MODE` aparece solo en 4 sitios (definición, 2 impresiones de arranque en `setup()` y el bloque de simulación al final de `loop()`); ningún condicional protege `RFID.begin`, el comando de inventario, el parser ni la reanudación | PASA |
+| `tests/run_checks.sh` (cabeceras idénticas y static_assert de protocolo/parser) | PASA |
+| Lectura real con el YRM10002 | **NO probada**: no se ha verificado físicamente que el lector detecte etiquetas con este firmware (el usuario reporta dificultades con la antena) |
+| Simulación cada 8 s tras este cambio, y convivencia real+simulado en hardware | **NO probada** tras el cambio (la simulación sí se validó antes, ver arriba) |
+
+## Procedimiento sugerido
+1. Coordinador cargado y corriendo (sin cambios).
+2. Cargar `EmisorC6` con `RFID_SIMULATION_MODE = true`, lector conectado. Esperar `Conectado al coordinador`.
+3. Cada 8 s debe llegar un mensaje `ORIGEN: SIMULADO` al coordinador; al acercar una etiqueta debe aparecer `[RFID REAL] EPC detectado` en el emisor y un mensaje con `ORIGEN: lector RFID real` en el coordinador. Si no aparece, el problema está antes de Zigbee (lector/antena/cableado).
+4. Repetir con `false`: no debe haber mensajes `[SIM]` ni `ORIGEN: SIMULADO`.

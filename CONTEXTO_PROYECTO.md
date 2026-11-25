@@ -16,6 +16,13 @@ Se implementó la primera versión de extremo a extremo (compila; **no probada e
 - El emisor tiene `RFID_SIMULATION_MODE` (constante al inicio de `EmisorC6.ino`, hoy `true`) que mete EPC ficticios en la misma cola; `FLAG_SIMULATED` = bit1 de `flags`.
 - Flujo: tag → YRM10002 → UART1 (RX4/TX5) → parser → cola → Zigbee (EP10 → EP1 del coordinador) → Serial del coordinador.
 
+### 0.1 Enlace Coordinador → LilyGO 7070 (trazabilidad) — implementado y compilado, **no probado en hardware**
+- Basado en `Ejemplos/c6_lilygo` (auditado en `PROTOCOLO_C6_LILYGO.md`): **UART por hardware** 115200 8N1; C6 `Serial1` TX=GPIO10/RX=GPIO11; LilyGO `Serial2` RX=GPIO32/TX=GPIO33; texto ASCII, una línea por mensaje (`println`). El ejemplo no tenía ACK, validación ni recuperación; no documenta cableado (GND común) ni placa.
+- `CoordinadorC6` además reenvía cada evento RFID válido al LilyGO con línea `$RFID,…*HH` (MSG ID original, EPC, RSSI lector, RSSI Zigbee, REAL/SIMULADO, NWK e IEEE del emisor, IEEE y sesión del coordinador, `tRxMs`/`tTxMs` = uptime del coordinador, estado V/D/G, `seq` del enlace). Anillo de 16 pendientes, escritura no bloqueante; el callback Zigbee no cambió; sin LilyGO el coordinador sigue operando.
+- `LilyGoReceptor/LilyGoReceptor.ino` (nuevo): lectura no bloqueante, validación completa, detección de saltos/duplicados, ACK opcional, muestra el formato "RFID TRACEABILITY". `trace_link.h` duplicado idéntico en ambas carpetas; pruebas en `tests/trace_link_selftest.cpp`.
+- Sin timestamp de lectura RFID (el emisor no lo envía); los tiempos son uptime del coordinador. Sin reintentos (v1).
+- Emisor sin cambios en este paso. Compilar/validar: `bash tests/run_checks.sh`.
+
 ## 1. Resumen ejecutivo (estado al momento de la auditoría; ver sección 0)
 Repositorio de prototipado IoT con ESP32-C6. Hoy contiene (a) un lector RFID UHF funcionando por UART que imprime EPC/RSSI por Serial, y (b) un ejemplo didáctico Zigbee de terceros (coordinador-interruptor + router-relé). **No están integrados.** El objetivo aparente (RFID → Zigbee → coordinador) es **[INFERIDO]**, no documentado.
 

@@ -144,3 +144,34 @@ Coordinador:
 2. Cargar `EmisorC6` con `RFID_SIMULATION_MODE = true`, lector conectado. Esperar `Conectado al coordinador`.
 3. Cada 8 s debe llegar un mensaje `ORIGEN: SIMULADO` al coordinador; al acercar una etiqueta debe aparecer `[RFID REAL] EPC detectado` en el emisor y un mensaje con `ORIGEN: lector RFID real` en el coordinador. Si no aparece, el problema está antes de Zigbee (lector/antena/cableado).
 4. Repetir con `false`: no debe haber mensajes `[SIM]` ni `ORIGEN: SIMULADO`.
+
+---
+
+# Enlace Coordinador → LilyGO 7070 (trazabilidad)
+
+Detalle de diseño y formato: `PROTOCOLO_C6_LILYGO.md`.
+
+## Validación sin hardware (2026-11-24)
+| Prueba | Resultado |
+|---|---|
+| `CoordinadorC6` compila (`zczr` / `zigbee_zczr`), 0 advertencias | PASA (694 628 B, 52 %) |
+| `EmisorC6` (sin cambios) compila | PASA (692 858 B) |
+| `LilyGoReceptor` compila con `esp32:esp32:esp32` (ESP32 Dev Module), 0 advertencias | PASA (285 532 B, 21 %) — placa exacta del ejemplo no documentada |
+| Formato de línea: ida y vuelta (EPC 1/12/32 B, real/simulado, estados V/D/G, IEEE conocida/desconocida, valores límite), layout exacto, truncada en cualquier punto → rechazada, un byte alterado en cualquier posición → rechazado, versión/origen/EPC impar o vacío/hex/estado/campos/rangos inválidos, ACK | PASA (`static_assert`, `tests/trace_link_selftest.cpp`) |
+| Las pruebas fallan si se rompe el checksum (mutación temporal) | Falla como se espera (6 aserciones) |
+| Copias de `trace_link.h` idénticas | PASA (`cmp`) |
+| Callback Zigbee sin impresiones ni UART | Revisado: sin cambios; solo copia a cola con espera 0 y `millis()` |
+| **Enlace físico C6 ↔ LilyGO, ACK, IEEE del emisor, comportamiento con LilyGO apagado/desconectado, ráfagas** | **NO probado** |
+
+## Cableado a verificar (deducido de `Ejemplos/c6_lilygo`, no documentado allí)
+- C6 GPIO10 (TX) → LilyGO GPIO32 (RX)
+- C6 GPIO11 (RX) ← LilyGO GPIO33 (TX) *(solo ACK; opcional)*
+- GND del C6 ↔ GND del LilyGO (imprescindible; ambos 3,3 V lógicos)
+
+## Procedimiento manual
+1. Cargar `CoordinadorC6` en el C6 coordinador y `LilyGoReceptor` en el LilyGO (monitor 115200). Emisor sin recargar.
+2. Con el cableado anterior, el LilyGO debe mostrar `RFID TRACEABILITY` / `esperando eventos…`.
+3. Con el emisor enviando (simulado cada 8 s), el coordinador debe mostrar `[LILYGO] Enviado seq N …` y, si el cable RX está conectado, `[LILYGO] ACK seq N`. El LilyGO debe mostrar `[EVENTO RFID]` con el mismo MSG ID y EPC que el coordinador, `ORIGEN: SIMULADO`, `RSSI ZIGBEE`, `DISPOSITIVO ORIGEN` (NWK e IEEE) y `[TRANSPORTE SERIAL] ESTADO: RECIBIDO`, `CHECKSUM: OK`.
+4. Criterio de éxito: MSG ID y EPC idénticos en emisor, coordinador y LilyGO durante varios minutos, sin `[ERROR RX]` ni saltos de SEQ.
+5. Pruebas de fallo: (a) apagar el LilyGO 1 minuto: el coordinador debe seguir recibiendo por Zigbee y mostrar `Sin ACK`; al volver, los nuevos eventos llegan y el LilyGO debe reportar `SALTO DE SEQ: faltan N` (los eventos escritos mientras estaba apagado se pierden, pero el hueco en `seq` los delata; `ack` queda por debajo de `enviados` en el coordinador); (b) desconectar y reconectar el cable TX del C6 con el sistema en marcha; (c) acercar una etiqueta real y verificar `ORIGEN: REAL`.
+6. Pegar los logs de las tres consolas para registrar resultados aquí.
